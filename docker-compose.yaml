@@ -1,0 +1,129 @@
+services:
+  app:
+    build: .
+    environment:
+      PORT: "8080"
+      DATABASE_URL: "postgres://app:${POSTGRES_PASSWORD}@postgres:5432/highload?sslmode=disable"
+      POD_ID: "1"
+      DATACENTER: "local"
+      DEPLOYMENT: "highload"
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/health"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile.goose
+    environment:
+      GOOSE_DRIVER: postgres
+      GOOSE_DBSTRING: "postgres://app:${POSTGRES_PASSWORD}@postgres:5432/highload?sslmode=disable"
+    command: ["up"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+      POSTGRES_DB: highload
+    ports:
+      - "127.0.0.1:15432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d highload"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+  victoriametrics:
+    image: victoriametrics/victoria-metrics:v1.154.0
+    command:
+      - "-promscrape.config=/etc/victoriametrics/prometheus.yml"
+      - "-storageDataPath=/storage"
+    volumes:
+      - ./deploy/prometheus.yml:/etc/victoriametrics/prometheus.yml:ro
+      - victoriametrics_data:/storage
+    ports:
+      - "127.0.0.1:8428:8428"
+    depends_on:
+      app:
+        condition: service_healthy
+  grafana:
+    image: grafana/grafana:13.2.4
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:?Укажи пароль Grafana в .env}"
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      victoriametrics:
+        condition: service_started
+    healthcheck:
+      test: [ "CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:3000/api/health" ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 20s
+  grafana-init:
+    build:
+      context: .
+      dockerfile: Dockerfile.grafana-init
+    environment:
+      GRAFANA_URL: http://grafana:3000
+      GRAFANA_ADMIN_USER: admin
+      GRAFANA_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:?Укажи пароль Grafana в .env}"
+      GRAFANA_TOKEN_FILE: /run/grafana/token
+    volumes:
+      - grafana_token:/run/grafana
+    depends_on:
+      grafana:
+        condition: service_healthy
+  dashboard-generator:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard-generator
+    environment:
+      APP_URL: http://app:8080
+      GRAFANA_URL: http://grafana:3000
+      GRAFANA_TOKEN_FILE: /run/grafana/token
+    volumes:
+      - grafana_token:/run/grafana:ro
+    depends_on:
+      app:
+        condition: service_healthy
+      grafana:
+        condition: service_healthy
+      grafana-init:
+        condition: service_completed_successfully
+  load-generator:
+    image: grafana/k6:2.3.0
+    command: ["run", "/scripts/load.js"]
+    environment:
+      APP_URL: http://app:8080
+      TARGET_RPS: "50"
+      ERROR_RATE: "0.1"
+    volumes:
+      - ./load:/scripts:ro
+    depends_on:
+      app:
+        condition: service_healthy
+      dashboard-generator:
+        condition: service_completed_successfully
+volumes:
+  postgres_data:
+  victoriametrics_data:
+  grafana_data:
+  grafana_token:
