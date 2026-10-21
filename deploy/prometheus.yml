@@ -1,0 +1,10 @@
+global:
+  scrape_interval: 5s
+  scrape_timeout: 3s
+
+scrape_configs:
+  - job_name: highload
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - app:8080
