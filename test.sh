@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+
+cd "$(dirname "$0")/hw2"
+go vet ./...
+go test -race -count=1 -timeout=60s ./...
